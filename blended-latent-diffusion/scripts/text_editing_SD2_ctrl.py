@@ -4,7 +4,6 @@ from PIL import Image
 
 from diffusers import DDIMScheduler, StableDiffusionControlNetPipeline, ControlNetModel
 import torch
-# import cv2
 import torchvision.transforms as T
 
 
@@ -20,12 +19,7 @@ class BlendedLatentDiffusion:
         parser.add_argument("--mask", type=str, required=True, help="The path to the input mask")
         parser.add_argument("--control_image", type=str, required=True, help="The path to the control image for ControlNet")
         parser.add_argument("--controlnet_path", type=str, required=True, help="Path to ControlNet model")
-        parser.add_argument(
-            "--model_path",
-            type=str,
-            default="stabilityai/stable-diffusion-2-1-base",
-            help="The path to the HuggingFace model",
-        )
+        parser.add_argument("--model_path", type=str, default="stabilityai/stable-diffusion-2-1-base", help="The path to the HuggingFace model")
         parser.add_argument("--batch_size", type=int, default=4, help="The number of images to generate")
         parser.add_argument("--blending_start_percentage", type=float, default=0.25, help="The diffusion steps percentage to jump")
         parser.add_argument("--device", type=str, default="cuda")
@@ -53,27 +47,34 @@ class BlendedLatentDiffusion:
             set_alpha_to_one=False,
         )
 
+    @classmethod
+    def from_parameters(cls, **kwargs):
+        self = cls.__new__(cls)  # bypass __init__()
+        self.args = argparse.Namespace(**kwargs)
+        self.load_models()
+        return self
+
     @torch.no_grad()
     def edit_image(
         self,
-        image_path,
-        mask_path,
-        control_image_path,
-        prompts,
         height=512,
         width=512,
         num_inference_steps=50,
         guidance_scale=7.5,
         generator=torch.manual_seed(42),
-        blending_percentage=0.25,
     ):
-        batch_size = len(prompts)
-        image = Image.open(image_path).convert("RGB").resize((height, width))
-        source_latents = self._image2latent(np.array(image))
-        latent_mask, org_mask = self._read_mask(mask_path)
 
-        control_image = self._prepare_depth_map(control_image_path, height, width)
+        image = Image.open(self.args.init_image)
+        image = image.resize((height, width), Image.BILINEAR)
+        image = np.array(image)[:, :, :3]
+        source_latents = self._image2latent(image)
+   
+        latent_mask, org_mask = self._read_mask(self.args.mask)
+
+        control_image = self._prepare_depth_map(self.args.control_image, height, width)
         control_image_tensor = T.ToTensor()(control_image).unsqueeze(0).to(self.args.device).half()
+
+        prompts = [self.args.prompt] * self.args.batch_size
 
         text_input = self.tokenizer(
             prompts,
@@ -86,7 +87,7 @@ class BlendedLatentDiffusion:
 
         max_length = text_input.input_ids.shape[-1]
         uncond_input = self.tokenizer(
-            [""] * batch_size,
+            [""] * self.args.batch_size,
             padding="max_length",
             max_length=max_length,
             return_tensors="pt",
@@ -95,13 +96,13 @@ class BlendedLatentDiffusion:
         text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
         latents = torch.randn(
-            (batch_size, self.unet.in_channels, height // 8, width // 8),
+            (self.args.batch_size, self.unet.in_channels, height // 8, width // 8),
             generator=generator,
         ).to(self.args.device).half()
 
         self.scheduler.set_timesteps(num_inference_steps, device=self.args.device)
 
-        for t in self.scheduler.timesteps[int(len(self.scheduler.timesteps) * blending_percentage):]:
+        for t in self.scheduler.timesteps[int(len(self.scheduler.timesteps) * self.args.blending_start_percentage):]:
             # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
             latent_model_input = torch.cat([latents] * 2)
 
@@ -164,19 +165,12 @@ class BlendedLatentDiffusion:
         return mask, org_mask
 
     def _prepare_depth_map(self, path, height, width):
-        # Assume the image is a colormapped RGB depth map
         image = Image.open(path).convert("RGB").resize((width, height))
         return image
 
 
 if __name__ == "__main__":
     bld = BlendedLatentDiffusion()
-    results = bld.edit_image(
-        bld.args.init_image,
-        bld.args.mask,
-        bld.args.control_image,
-        prompts=[bld.args.prompt] * bld.args.batch_size,
-        blending_percentage=bld.args.blending_start_percentage,
-    )
+    results = bld.edit_image()
     results_flat = np.concatenate(results, axis=1)
     Image.fromarray(results_flat).save(bld.args.output_path)
