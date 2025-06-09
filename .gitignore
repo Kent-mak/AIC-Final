@@ -2,3 +2,5 @@ ControlNet/model*/
 /flash-attention/
 **/wandb/
 ControlNet/xformers
+/instruct-gs2gs
+/VIDIT-FAID-checkpoints

@@ -172,7 +172,7 @@ tags
 
 # Project Stuff
 outputs/
-inputs/
+
 evaluations/
 *.ckpt
 src/
